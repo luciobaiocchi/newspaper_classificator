@@ -21,13 +21,11 @@ df = pd.read_csv("winter_project_2026/development.csv")
 eva = pd.read_csv("winter_project_2026/evaluation.csv")
 
 # Rimozione duplicati e gestione valori nulli
-duplicated_mask = df.duplicated(subset=['title', 'article'])
-to_drop_ids = df[df['article'].isin(df[duplicated_mask]['article'])]['Id']
-df.drop(index=to_drop_ids, errors='ignore', inplace=True)
+df.drop_duplicates(inplace=True)
 df.dropna(inplace=True)
 
 y = df['label']
-# Feature Engineering: unione titolo (pesato x2) e articolo
+
 df['text'] = df['title'] + ' ' + df['title'] + ' ' + df['article']
 df.drop(columns=['label', 'title', 'article'], inplace=True)
 
