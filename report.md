@@ -47,6 +47,8 @@ Label divided like so:
  5    6.425879
  6    7.248227
  Name: title_word_count, dtype: float64)
+Not well distributed, (use plot_label_distribution.pdf) and also highlight the fact that label 5 and 0 has ovelapping words (use plot_overlap_0_5.pdf to prove our claim).
+
 
 # Proposed approach
 ## Data preprocessing
