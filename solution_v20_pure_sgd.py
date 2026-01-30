@@ -136,7 +136,7 @@ def create_pipeline():
     clf = SGDClassifier(
         loss='modified_huber',
         penalty='l2',
-        alpha=7e-5,  # Between 5e-5 and 1e-4
+        alpha=1e-4,  # Between 5e-5 and 1e-4
         max_iter=10000,  # More iterations
         tol=1e-7,  # Tighter tolerance
         random_state=42,
@@ -157,7 +157,7 @@ def run_validation():
     print("Solution V20 - Pure SGD Optimized")
     print("=" * 60)
     
-    df = pd.read_csv("development.csv")
+    df = pd.read_csv("winter_project_2026/development.csv")
     print("Preprocessing...")
     df = preprocess_dataframe(df, is_train=True)
     
@@ -195,14 +195,14 @@ def generate_submission():
     print("GENERATING SUBMISSION")
     print("=" * 60)
     
-    df_train = pd.read_csv("development.csv")
+    df_train = pd.read_csv("winter_project_2026/development.csv")
     print("Preprocessing train...")
     df_train = preprocess_dataframe(df_train, is_train=True)
     
     y_train = df_train['label']
     X_train = df_train.drop('label', axis=1)
     
-    df_eval = pd.read_csv("evaluation.csv")
+    df_eval = pd.read_csv("winter_project_2026/evaluation.csv")
     eval_ids = df_eval['Id'].copy()
     print("Preprocessing eval...")
     df_eval = preprocess_dataframe(df_eval, is_train=False)
@@ -230,6 +230,6 @@ def generate_submission():
 
 
 if __name__ == "__main__":
-    pipeline, score = run_validation()
+#    pipeline, score = run_validation()
     print("\n")
     submission = generate_submission()
