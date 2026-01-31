@@ -1,163 +1,170 @@
-import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
+import numpy as np
+import re
+from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.linear_model import SGDClassifier
 from sklearn.pipeline import Pipeline
-from sklearn.linear_model import LogisticRegression
-from xgboost import XGBClassifier
+from sklearn.feature_selection import SelectKBest, chi2
+from sklearn.metrics import classification_report, f1_score
+from nltk.stem import SnowballStemmer
+import warnings
+warnings.filterwarnings('ignore')
 
-RANDOM_SEED = 42
-np.random.seed(RANDOM_SEED)
+stemmer = SnowballStemmer("english")
 
-# 1. CARICAMENTO DATI
-print("Caricamento dati...")
-X = pd.read_csv("winter_project_2026/development.csv")
-X_test = pd.read_csv("winter_project_2026/evaluation.csv")
+def stemmed_tokenizer(text):
+    tokens = re.findall(r'(?u)\b\w\w+\b', text)
+    return [stemmer.stem(t) for t in tokens]
 
-# Salviamo gli ID per la submission prima di toccare qualsiasi cosa
-test_ids = X_test['Id'].copy()
 
-# 2. PULIZIA TRAIN (Qui possiamo droppare)
-# Rimuovi duplicati e NaNs solo dal train
-rows_duplicated = X.duplicated(subset=['article', 'title'])
-X = X[~rows_duplicated]
-X.dropna(inplace=True)
-
-# Separiamo label
-y = X['label']
-X.drop(['label', 'Id'], inplace=True, axis=1, errors='ignore')
-
-# 3. PULIZIA TEST (Qui NON possiamo droppare, usiamo fillna)
-# Se ci sono NaN nel test, li facciamo diventare stringhe vuote per non far crashare il TF-IDF
-X_test['title'] = X_test['title'].fillna("")
-X_test['article'] = X_test['article'].fillna("")
-# Nota: Non droppiamo 'Id' da X_test ancora, o se lo facciamo, usiamo test_ids salvato prima
-
-# 4. FEATURE ENGINEERING (Metodo Diretto e Sicuro)
-print("Creazione colonna 'text'...")
-# Usiamo assegnazione diretta, molto più sicuro di concat+rename
-X['text'] = X['title'] + " " + X['title'] + " " + X['article']
-X_test['text'] = X_test['title'] + " " + X_test['title'] + " " + X_test['article']
-
-def process_dates(df, col_name='date'):
-    # 1. 'coerce': Se trovi "0000-00-00", trasformalo in NaT (Null) invece di crashare
-    df[col_name] = pd.to_datetime(df[col_name], errors='coerce')
+def preprocess_dataframe(df, is_train=True):
+    if is_train:
+        df = df.copy()
+        df.drop_duplicates(inplace=True)
+        df = df.dropna()
+    else:
+        df = df.copy()
+        df['title'] = df['title'].fillna('')
+        df['article'] = df['article'].fillna('')
+        df['source'] = df['source'].fillna('Unknown')
     
-    # 2. Estrai i componenti base
-    # Usiamo .dt direttamente. Dove la data è NaT, otterremo NaN (che va bene per XGBoost!)
-    df['hour'] = df[col_name].dt.hour
-    df['month'] = df[col_name].dt.month
-    df['day_of_week'] = df[col_name].dt.dayofweek
+    # Source boosting on pure sources
+    pure_sources = [
+        'Syfy.com', 'Topix', 'PCWorld', 'BCC', 'Computerworld', 
+        'Register', 'Search', 'CNET', 'InfoWorld', 'IPS', 'Topix.Net',
+        'Motley', 'Ananova', 'Forbes', 'Newsweek', 'News', 'CNN',
+        'Sports', 'ESPN'
+    ]
     
-    # 3. Cyclical Encoding (Seno e Coseno)
-    # Se 'hour' è NaN, anche il seno/coseno sarà NaN.
-    # XGBoost gestisce i NaN automaticamente imparando come trattarli.
+    s = df['source']
+    t = df['title']
+    a = df['article']
     
-    # ORA
-    df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24.0)
-    df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24.0)
+    text_boosted = s + ' ' + s + ' ' + s + ' ' + s + ' ' + t + ' ' + t + ' ' + t + ' ' + t + ' ' + a + ' ' + a
+    text_standard = s + ' ' + s + ' ' + t + ' ' + t + ' ' + t + ' ' + a + ' ' + a
     
-    # MESE
-    df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12.0)
-    df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12.0)
+    df['text'] = np.where(df['source'].isin(pure_sources), text_boosted, text_standard)
     
-    # GIORNO
-    df['day_sin'] = np.sin(2 * np.pi * df['day_of_week'] / 7.0)
-    df['day_cos'] = np.cos(2 * np.pi * df['day_of_week'] / 7.0)
+    # Temporal features
+    weekdays = []
+    daytime = []
+    for day in df['timestamp']:
+        try:
+            if day == '0000-00-00 00:00:00':
+                week_day = -1
+                hour_day = -1
+            else:
+                ts = pd.Timestamp(day)
+                week_day = ts.day_of_week
+                hour = ts.hour
+                if 5 < hour <= 14:
+                    hour_day = 1
+                elif 14 < hour <= 21:
+                    hour_day = 2
+                elif (21 < hour <= 23) or (0 <= hour <= 5):
+                    hour_day = 3
+                else:
+                    hour_day = 0
+        except:
+            week_day = -1
+            hour_day = -1
+        
+        daytime.append(hour_day)
+        weekdays.append(week_day)
+        
+    df['day_of_week'] = weekdays
+    df['moment_of_day'] = daytime
     
-    # Opzionale: Riempiamo i NaN con 0 per pulizia (0 è il centro del cerchio, "neutro")
-    # Oppure lasciamoli NaN, XGBoost se la cava. Per sicurezza riempiamoli con 0.
-    new_cols = ['hour_sin', 'hour_cos', 'month_sin', 'month_cos', 'day_sin', 'day_cos']
-    df[new_cols] = df[new_cols].fillna(0)
+    df['article_len'] = df['article'].apply(len)
+    df['title_len'] = df['title'].fillna('').apply(len)
+    df['log_article_len'] = np.log1p(df['article_len'])
+    df['log_title_len'] = np.log1p(df['title_len'])
     
     return df
 
 
-X = process_dates(X, col_name='timestamp') 
-X_test = process_dates(X_test, col_name='timestamp')
-
-time_features = ['hour_sin', 'hour_cos', 'month_sin', 'month_cos', 'day_sin', 'day_cos']
-
-# 5. PREPARAZIONE VOCABOLARIO (La tua logica custom)
-print("Estrazione vocabolario specifico...")
-TOP_K_PER_CLASS = 7000 
-final_vocabulary = set()
-classes = np.unique(y)
-
-for label in classes:
-    subset_text = X[y == label]['text']
-    temp_vectorizer = TfidfVectorizer(
-        max_features=TOP_K_PER_CLASS,
-        stop_words='english',
-        ngram_range=(1, 2),
-        min_df=2
+def create_pipeline():
+    encoder = OneHotEncoder(min_frequency=50, handle_unknown='ignore')  
+    
+    text_pipe = Pipeline([
+        ('vec', TfidfVectorizer(
+            max_features=100000,  
+            ngram_range=(1, 2),
+            min_df=2,
+            sublinear_tf=True,
+            tokenizer=stemmed_tokenizer
+        )),
+        ('sel', SelectKBest(chi2, k=60000))  
+    ])
+    
+    char_pipe = Pipeline([
+        ('vec', TfidfVectorizer(
+            analyzer="char",
+            ngram_range=(3, 5),
+            min_df=3,
+            max_features=50000,  
+            sublinear_tf=True
+        )),
+        ('sel', SelectKBest(chi2, k=25000)) 
+    ])
+    
+    preprocessor = ColumnTransformer(transformers=[
+        ('categorical', encoder, ['source', 'day_of_week', 'moment_of_day']),
+        ('text', text_pipe, 'text'),
+        ('text_char', char_pipe, 'text'),
+        ('pagerank', StandardScaler(), ['page_rank']),
+        ('lengths', StandardScaler(), ['log_article_len', 'log_title_len'])
+    ], remainder='drop', n_jobs=-1)
+    
+    clf = SGDClassifier(
+        loss='modified_huber',
+        penalty='l2',
+        alpha=7e-5, 
+        max_iter=10000,  
+        tol=1e-7, 
+        random_state=42,
+        class_weight='balanced',
+        n_jobs=-1,
+        early_stopping=False,
+        shuffle=True
     )
-    temp_vectorizer.fit(subset_text)
-    final_vocabulary.update(temp_vectorizer.get_feature_names_out())
+    
+    return Pipeline(steps=[
+        ('preprocessor', preprocessor),
+        ('classifier', clf)
+    ])
 
-final_vocabulary_list = list(final_vocabulary)
-print(f"Vocabolario totale: {len(final_vocabulary_list)} parole.")
+def generate_submission():
+    df_train = pd.read_csv("winter_project_2026/development.csv")
+    df_train = preprocess_dataframe(df_train, is_train=True)
+    
+    y_train = df_train['label']
+    X_train = df_train.drop('label', axis=1)
+    
+    df_eval = pd.read_csv("winter_project_2026/evaluation.csv")
+    eval_ids = df_eval['Id'].copy()
 
-# 6. DEFINIZIONE PREPROCESSOR
-encoder = OneHotEncoder(min_frequency=1, handle_unknown='infrequent_if_exist')
-# Vectorizer con vocabolario forzato
-master_vectorizer = TfidfVectorizer(
-    vocabulary=final_vocabulary_list, 
-    stop_words='english',
-    ngram_range=(1, 2)
-)
+    df_eval = preprocess_dataframe(df_eval, is_train=False)
+    
+    pipeline = create_pipeline()
+    
+    pipeline.fit(X_train, y_train)
+    
+    y_pred = pipeline.predict(df_eval)
+    
+    submission = pd.DataFrame({
+        'Id': eval_ids,
+        'Predicted': y_pred
+    })
+    
+    submission_file = 'submission.csv'
+    submission.to_csv(submission_file, index=False)
+    
+    return submission
 
-# Se ti da ancora errore, metti n_jobs=1 per vedere il messaggio vero
-preprocessor_custom = ColumnTransformer(transformers=[
-    ('source', encoder, ['source']),
-    ('text', master_vectorizer, 'text'),
-    ('time', StandardScaler(), time_features),
-    ('page_rank', StandardScaler(), ['page_rank'])
-], remainder='drop', n_jobs=1) # Messo a 1 per sicurezza in debug
 
-# 7. MODELLO (Logistic Regression o XGBoost)
-# Usiamo LogisticRegression come nel tuo esempio (o cambia con clf XGBoost)
-
-clf = LogisticRegression(
-    random_state=RANDOM_SEED,
-    C=1, penalty='l2', 
-    solver='saga', 
-    class_weight='balanced', 
-    n_jobs=-1,
-    max_iter=1000
-)
-
-#clf = XGBClassifier(
-#    n_estimators=1000,     
-#    learning_rate=0.1,     
-#    max_depth=6,            
-#    subsample=0.8,          
-#    colsample_bytree=0.8,   
-#    n_jobs=-1,              
-#    random_state=42,
-#    tree_method="hist"      
-#    
-#)
-
-# 8. PIPELINE COMPLETA (Fit & Predict)
-full_pipeline = Pipeline([
-    ('preprocessor', preprocessor_custom),
-    ('classifier', clf)
-])
-
-print("Addestramento in corso...")
-full_pipeline.fit(X, y)
-
-print("Predizione sul Test Set...")
-y_pred = full_pipeline.predict(X_test)
-
-# 9. CREAZIONE FILE SUBMISSION (Corretto)
-print("Salvataggio submission.csv...")
-submission = pd.DataFrame({
-    'Id': test_ids,    # Usiamo gli ID salvati all'inizio
-    'Predicted': y_pred # O 'label' o 'Category' a seconda delle regole della gara
-})
-
-submission.to_csv('submission.csv', index=False)
-print("Fatto! File pronto.")
+if __name__ == "__main__":
+    submission = generate_submission()
